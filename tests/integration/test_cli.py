@@ -17,19 +17,32 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
+import pytest
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
-
-# CI runs in a narrow terminal, which makes Rich truncate long --option
-# names in --help output (e.g. `--against-codeown…`). Pin the width so
-# substring assertions on help text are stable across environments.
-os.environ["COLUMNS"] = "200"
 
 from tend.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture
+def wide_terminal(monkeypatch):
+    """Force Rich/Typer to render help at a fixed wide width.
+
+    CI lacks a TTY, so Rich falls back to a narrow width (~110 cols on
+    GitHub Actions) and truncates long option names like
+    `--against-codeowners` to `--against-codeown…`. COLUMNS env vars
+    aren't honored reliably through CliRunner's isolated environment,
+    so patch the underlying size source directly.
+    """
+    size = os.terminal_size((200, 50))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda *_a, **_kw: size)
+    monkeypatch.setenv("COLUMNS", "200")
+
 
 # Tend issues GET /repos/.../commits with a since= query param whose value is
 # computed from datetime.now(). Match the URL without binding to that value.
@@ -57,7 +70,7 @@ def test_analyze_help_describes_yaml_output():
     assert "owners.yml" in result.stdout
 
 
-def test_diff_help_shows_against_codeowners():
+def test_diff_help_shows_against_codeowners(wide_terminal):  # noqa: ARG001
     result = runner.invoke(app, ["diff", "--help"])
     assert result.exit_code == 0
     assert "--against-codeowners" in result.stdout
