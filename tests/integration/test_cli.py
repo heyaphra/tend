@@ -15,13 +15,19 @@ test ever talks to api.github.com.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
-from tend.cli import app
+# CI runs in a narrow terminal, which makes Rich truncate long --option
+# names in --help output (e.g. `--against-codeown…`). Pin the width so
+# substring assertions on help text are stable across environments.
+os.environ["COLUMNS"] = "200"
+
+from tend.cli import app  # noqa: E402
 
 runner = CliRunner()
 
