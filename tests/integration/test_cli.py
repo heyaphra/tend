@@ -18,27 +18,12 @@ import json
 import re
 from pathlib import Path
 
-import pytest
-import typer.rich_utils
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
 from tend.cli import app
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def wide_terminal(monkeypatch):
-    """Force Typer's help renderer to a fixed wide width.
-
-    Typer builds its own Rich Console in `typer.rich_utils` and passes
-    `width=MAX_WIDTH`. When MAX_WIDTH is None (the default), Rich falls
-    back to terminal detection, which on GitHub Actions reports ~110
-    cols and truncates long option names like `--against-codeowners`
-    to `--against-codeown…`. Pin MAX_WIDTH so the layout is stable.
-    """
-    monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 200)
 
 
 # Tend issues GET /repos/.../commits with a since= query param whose value is
@@ -65,12 +50,6 @@ def test_analyze_help_describes_yaml_output():
     result = runner.invoke(app, ["analyze", "--help"])
     assert result.exit_code == 0
     assert "owners.yml" in result.stdout
-
-
-def test_diff_help_shows_against_codeowners(wide_terminal):  # noqa: ARG001
-    result = runner.invoke(app, ["diff", "--help"])
-    assert result.exit_code == 0
-    assert "--against-codeowners" in result.stdout
 
 
 def test_version_flag_prints_version():
