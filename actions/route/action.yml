@@ -1,0 +1,46 @@
+name: 'Tend — route security events'
+description: 'Route PRs (and v1.1: Dependabot alerts) to .tend/owners.yml owners'
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  owners-file:
+    description: 'Path to .tend/owners.yml'
+    default: '.tend/owners.yml'
+  routing-mode:
+    description: 'assign | request-review | comment | all'
+    default: 'request-review'
+  github-token:
+    description: 'Token for assignment and review-request API'
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install tend
+      shell: bash
+      run: |
+        pip install --quiet "tend @ git+https://github.com/${{ github.action_repository }}@${{ github.action_ref }}"
+
+    - name: Route event
+      shell: bash
+      env:
+        TEND_GITHUB_TOKEN: ${{ inputs.github-token }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_PATH: ${{ github.event_path }}
+      run: |
+        # v1 routes only Dependabot-authored pull_request events; all other
+        # PRs are logged and skipped by the CLI. dependabot_alert events
+        # are recognized and logged but not routed — full handling lands
+        # in v1.1.
+        tend route \
+          --owners-file "${{ inputs.owners-file }}" \
+          --mode "${{ inputs.routing-mode }}" \
+          --repo "${{ github.repository }}"

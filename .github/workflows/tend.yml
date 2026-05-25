@@ -1,0 +1,29 @@
+name: tend (dogfood)
+
+# Tend running against its own repo. Triggered manually only by default
+# (workflow_dispatch); the weekly cron is intentionally commented out
+# until the maintainer enables it. This avoids surprise PRs landing on
+# the repo before anyone is watching.
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 12 * * 1'   # Mondays at noon UTC — uncomment to enable dogfood
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./actions/analyze
+        with:
+          sensitivity: balanced
+
+      - name: Sanity-check CODEOWNERS was not touched
+        run: |
+          if git diff --name-only main -- '**/CODEOWNERS' 'CODEOWNERS' | grep -q .; then
+            echo "::error::Tend touched a CODEOWNERS file; v1 must never write to it."
+            exit 1
+          fi

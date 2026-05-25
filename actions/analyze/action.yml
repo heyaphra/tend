@@ -1,0 +1,49 @@
+name: 'Tend — analyze ownership'
+description: 'Infer code ownership from contribution patterns and suggest .tend/owners.yml'
+branding:
+  icon: 'git-pull-request'
+  color: 'green'
+
+inputs:
+  sensitivity:
+    description: 'strict | balanced | permissive'
+    default: 'balanced'
+  lookback-days:
+    description: 'Days of history to consider'
+    default: '180'
+  output-path:
+    description: 'Path to write the ownership file'
+    default: '.tend/owners.yml'
+  advanced:
+    description: 'JSON object with InferenceConfig overrides'
+    default: '{}'
+  github-token:
+    description: 'Token for API access and PR creation'
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install tend
+      shell: bash
+      run: |
+        pip install --quiet "tend @ git+https://github.com/${{ github.action_repository }}@${{ github.action_ref }}"
+
+    - name: Run analysis
+      shell: bash
+      env:
+        TEND_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        tend analyze \
+          --sensitivity "${{ inputs.sensitivity }}" \
+          --lookback-days "${{ inputs.lookback-days }}" \
+          --advanced '${{ inputs.advanced }}' \
+          --output-path "${{ inputs.output-path }}" \
+          --create-pr \
+          --repo "${{ github.repository }}"

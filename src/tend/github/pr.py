@@ -1,0 +1,356 @@
+"""Idempotent PR creation for ``.tend/owners.yml``.
+
+Stable branch ``tend/update``, content-hash marker in the PR body so
+subsequent runs can detect "same proposal" and no-op. At most one open
+PR per repo at any time.
+
+The body composer is YAML-shaped: it describes what changed in
+``.tend/owners.yml`` (paths added / owner changed / strength changed /
+removed) using qualitative strength labels rather than confidence
+percentages. CODEOWNERS is never referenced.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections import Counter
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+import httpx
+
+from tend.analyze._models import InferredOwner
+from tend.config import InferenceConfig, Sensitivity
+from tend.github.client import GitHubClient
+from tend.output.strength import annotate_rules
+from tend.output.tend_yaml import (
+    OwnersDiff,
+    OwnershipFile,
+    content_hash,
+    diff,
+    dump_full,
+    load,
+    loads,
+)
+
+logger = logging.getLogger(__name__)
+
+BRANCH_NAME = "tend/update"
+HASH_MARKER_PREFIX = "tend-hash:"
+HASH_MARKER_RE = re.compile(rf"<!--\s*{re.escape(HASH_MARKER_PREFIX)}([0-9a-f]{{8,64}})\s*-->")
+DEFAULT_FILE_PATH = ".tend/owners.yml"
+DEFAULT_COMMIT_MESSAGE = "tend: update .tend/owners.yml from contribution patterns"
+DEFAULT_PR_TITLE = "Update .tend/owners.yml from contribution patterns"
+
+_STRENGTH_ORDER = ("strong", "moderate", "suggestive")
+
+
+@dataclass
+class PrResult:
+    action: str  # "noop_same_hash" | "created" | "updated_branch" | "would_create"
+    url: str | None = None
+    branch: str | None = None
+    body: str | None = None  # populated for dry-run preview
+
+
+def _days_since(when: datetime) -> int:
+    now = datetime.now(UTC)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0, (now - when).days)
+
+
+def _format_evidence(rule: InferredOwner) -> str:
+    """One-line summary of the rule's top contributor.
+
+    Format: ``"24 commits, last touched 3 days ago (strong)"``.
+    No percentages — the YAML traffics in qualitative labels and the PR
+    body matches.
+    """
+    if not rule.owners:
+        return ""
+    top = rule.owners[0]
+    days = _days_since(top.last_active)
+    label = top.strength or "?"
+    return (
+        f"{top.commit_count} commits, last touched {days} day"
+        f"{'s' if days != 1 else ''} ago ({label})"
+    )
+
+
+def _render_added(rules: list[InferredOwner]) -> str:
+    if not rules:
+        return ""
+    lines = ["### Paths added\n"]
+    for r in rules:
+        if not r.owners:
+            continue
+        owners = ", ".join(f"@{o.github_username.lstrip('@')}" for o in r.owners)
+        lines.append(f"- `{r.path_pattern}` → {owners}")
+        lines.append(f"  - {_format_evidence(r)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_owner_changed(pairs: list[tuple[InferredOwner, InferredOwner]]) -> str:
+    if not pairs:
+        return ""
+    lines = ["### Owner changed\n"]
+    for old, new in pairs:
+        old_owner = old.owners[0].github_username if old.owners else "(none)"
+        new_owner = new.owners[0].github_username if new.owners else "(none)"
+        lines.append(
+            f"- `{new.path_pattern}`: was @{old_owner.lstrip('@')} → now @{new_owner.lstrip('@')}"
+        )
+        lines.append(f"  - {_format_evidence(new)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_strength_changed(pairs: list[tuple[InferredOwner, InferredOwner]]) -> str:
+    if not pairs:
+        return ""
+    lines = ["### Strength changed\n"]
+    for old, new in pairs:
+        if not (old.owners and new.owners):
+            continue
+        old_label = old.owners[0].strength or "?"
+        new_label = new.owners[0].strength or "?"
+        handle = new.owners[0].github_username.lstrip("@")
+        lines.append(f"- `{new.path_pattern}` (@{handle}): {old_label} → {new_label}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_removed(rules: list[InferredOwner]) -> str:
+    if not rules:
+        return ""
+    lines = ["### Paths removed\n"]
+    for r in rules:
+        owner = r.owners[0].github_username if r.owners else "(none)"
+        lines.append(f"- `{r.path_pattern}` (was @{owner.lstrip('@')}) — below current thresholds")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _strength_counts(rules: list[InferredOwner]) -> Counter[str]:
+    """Tally how many paths fall into each strength bucket."""
+    return Counter(r.owners[0].strength or "unlabeled" for r in rules if r.owners)
+
+
+def _summary_block(
+    new_rules: list[InferredOwner],
+    sensitivity: Sensitivity,
+    config: InferenceConfig,
+    repo_full_name: str,
+) -> list[str]:
+    counts = _strength_counts(new_rules)
+    label_summary = (
+        ", ".join(
+            f"{counts.get(label, 0)} {label}" for label in _STRENGTH_ORDER if counts.get(label)
+        )
+        or "0 paths"
+    )
+    return [
+        f"Generated by tend from the last {config.lookback_days} days of activity "
+        f"on `{repo_full_name}`. These are suggestions, not assignments — "
+        f"verify the evidence below before merging.",
+        "",
+        "### Summary",
+        "",
+        f"- Sensitivity: `{sensitivity}`",
+        f"- Lookback: {config.lookback_days} days",
+        f"- Owned paths: {label_summary}",
+        "",
+    ]
+
+
+def render_pr_body(
+    *,
+    rules: list[InferredOwner],
+    config: InferenceConfig,
+    sensitivity: Sensitivity,
+    repo_full_name: str,
+    content_hash_value: str,
+    diff_against: OwnersDiff | None,
+) -> str:
+    """Compose the PR body.
+
+    Strength labels must already be populated on every ``OwnerCandidate``
+    (call ``annotate_rules`` first). The diff section shows what changed;
+    first-time runs list every newly owned path instead.
+    """
+    sections = [
+        "## Suggested .tend/owners.yml update",
+        "",
+        *_summary_block(rules, sensitivity, config, repo_full_name),
+    ]
+
+    if diff_against is None:
+        sections.append(_render_added(rules))
+    else:
+        sections.append(_render_added(diff_against.paths_added))
+        sections.append(_render_owner_changed(diff_against.paths_owner_changed))
+        sections.append(_render_strength_changed(diff_against.paths_strength_changed))
+        sections.append(_render_removed(diff_against.paths_removed))
+
+    sections.extend(
+        [
+            "### How to use this",
+            "",
+            "- Each path lists the supporting evidence — verify against your team's understanding.",
+            "- Edit `owners` lists or remove paths you disagree with; tend "
+            "will respect your edits on the next run (the hash check no-ops "
+            "when content matches).",
+            "- Close this PR to reject; the next run detects identical content and no-ops.",
+            "",
+            "---",
+            f"<!-- {HASH_MARKER_PREFIX}{content_hash_value} -->",
+            "*Generated by tend*",
+            "",
+        ]
+    )
+    return "\n".join(s for s in sections if s)
+
+
+async def create_or_update_tend_pr(
+    *,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    rules: list[InferredOwner],
+    config: InferenceConfig,
+    sensitivity: Sensitivity,
+    file_path: str = DEFAULT_FILE_PATH,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> PrResult:
+    """Idempotently create or update the ``.tend/owners.yml`` suggestion PR.
+
+    Algorithm:
+      1. Annotate rules with strength labels (in place).
+      2. Render the YAML and compute the content hash.
+      3. Look up any open PR with head ``tend/update``.
+      4. If the existing PR's body carries the same hash → ``noop_same_hash``.
+      5. Otherwise: ensure the branch is at default-branch HEAD, write the
+         file, open a PR (or update the existing one's branch).
+    """
+    annotate_rules(
+        rules,
+        min_confidence=config.min_confidence,
+        lookback_days=config.lookback_days,
+        now=now,
+    )
+    yaml_content = dump_full(rules, config, sensitivity, now=now)
+    target_hash = content_hash(rules, config, sensitivity)
+
+    existing_yaml = await gh.get_file_content(owner, repo, file_path) if not dry_run else None
+    old_file: OwnershipFile | None = None
+    if existing_yaml:
+        try:
+            old_file = loads(existing_yaml)
+        except ValueError:
+            logger.warning(
+                "Existing %s on default branch couldn't be parsed; treating as first-time PR",
+                file_path,
+            )
+            old_file = None
+
+    new_file = OwnershipFile(
+        version=1,
+        generated_at=now or datetime.now(UTC),
+        config={},  # unused for diff
+        paths=rules,
+    )
+    diff_result = diff(old_file, new_file) if old_file is not None else None
+
+    body = render_pr_body(
+        rules=rules,
+        config=config,
+        sensitivity=sensitivity,
+        repo_full_name=f"{owner}/{repo}",
+        content_hash_value=target_hash,
+        diff_against=diff_result,
+    )
+
+    if dry_run:
+        return PrResult(
+            action="would_create",
+            branch=BRANCH_NAME,
+            url=None,
+            body=body,
+        )
+
+    head = f"{owner}:{BRANCH_NAME}"
+    existing_prs = await gh.list_open_pulls(owner, repo, head=head)
+    if existing_prs:
+        existing_pr = existing_prs[0]
+        existing_body = existing_pr.get("body") or ""
+        m = HASH_MARKER_RE.search(existing_body)
+        if m and m.group(1) == target_hash:
+            logger.info(
+                "Same content already proposed in PR #%s — skipping",
+                existing_pr["number"],
+            )
+            return PrResult(
+                action="noop_same_hash",
+                url=existing_pr.get("html_url"),
+                branch=BRANCH_NAME,
+            )
+
+    default_branch = await gh.get_default_branch(owner, repo)
+    base_ref = await gh.get_ref(owner, repo, f"heads/{default_branch}")
+    if base_ref is None:
+        raise RuntimeError(f"Could not resolve default branch {default_branch}")
+    base_sha = base_ref["object"]["sha"]
+
+    branch_ref = await gh.get_ref(owner, repo, f"heads/{BRANCH_NAME}")
+    if branch_ref is None:
+        await gh.create_branch(owner, repo, BRANCH_NAME, base_sha)
+    else:
+        try:
+            await gh.update_branch(owner, repo, BRANCH_NAME, base_sha, force=True)
+        except httpx.HTTPStatusError:
+            logger.warning("Could not fast-forward %s; committing on top", BRANCH_NAME)
+
+    file_sha = await gh.get_file_sha(owner, repo, file_path, BRANCH_NAME)
+    await gh.create_or_update_file(
+        owner=owner,
+        repo=repo,
+        path=file_path,
+        content=yaml_content,
+        message=DEFAULT_COMMIT_MESSAGE,
+        branch=BRANCH_NAME,
+        sha=file_sha,
+    )
+
+    if existing_prs:
+        logger.info("Updated branch on existing PR #%s", existing_prs[0]["number"])
+        return PrResult(
+            action="updated_branch",
+            url=existing_prs[0].get("html_url"),
+            branch=BRANCH_NAME,
+        )
+
+    pr = await gh.create_pull_request(
+        owner=owner,
+        repo=repo,
+        title=DEFAULT_PR_TITLE,
+        body=body,
+        head=BRANCH_NAME,
+        base=default_branch,
+    )
+    return PrResult(action="created", url=pr.get("html_url"), branch=BRANCH_NAME)
+
+
+__all__ = [
+    "BRANCH_NAME",
+    "DEFAULT_FILE_PATH",
+    "HASH_MARKER_PREFIX",
+    "HASH_MARKER_RE",
+    "PrResult",
+    "create_or_update_tend_pr",
+    "load",
+    "render_pr_body",
+]
