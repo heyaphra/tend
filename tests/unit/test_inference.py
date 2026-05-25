@@ -563,12 +563,10 @@ def test_teams_none_is_no_op_parity_with_pre_team_pipeline():
     ]
     baseline = infer(contribs, _cfg())
     with_none = infer(contribs, _cfg(), teams=None)
-    assert [r.path_pattern for r in with_none.rules] == [
-        r.path_pattern for r in baseline.rules
+    assert [r.path_pattern for r in with_none.rules] == [r.path_pattern for r in baseline.rules]
+    assert [[o.github_username for o in r.owners] for r in with_none.rules] == [
+        [o.github_username for o in r.owners] for r in baseline.rules
     ]
-    assert [
-        [o.github_username for o in r.owners] for r in with_none.rules
-    ] == [[o.github_username for o in r.owners] for r in baseline.rules]
 
 
 def test_teams_substitute_individual_handles_with_team_handle():

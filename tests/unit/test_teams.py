@@ -139,9 +139,7 @@ async def test_fetch_org_teams_happy_path_lowercases_members(httpx_mock: HTTPXMo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [403, 404])
-async def test_fetch_org_teams_returns_empty_on_listing_denied(
-    httpx_mock: HTTPXMock, status: int
-):
+async def test_fetch_org_teams_returns_empty_on_listing_denied(httpx_mock: HTTPXMock, status: int):
     httpx_mock.add_response(
         url="https://api.github.com/orgs/acme/teams?per_page=100",
         status_code=status,

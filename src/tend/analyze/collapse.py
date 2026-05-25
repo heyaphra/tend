@@ -229,9 +229,7 @@ def collapse_siblings(
             )
             if not parent_owners:
                 continue
-            new_parents.append(
-                InferredOwner(path_pattern=parent_pat, owners=parent_owners)
-            )
+            new_parents.append(InferredOwner(path_pattern=parent_pat, owners=parent_owners))
             for c in dominant_children:
                 consumed.add(c.path_pattern)
 

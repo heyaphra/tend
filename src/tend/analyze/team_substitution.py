@@ -65,9 +65,7 @@ def substitute_teams(
 
     out: list[InferredOwner] = []
     for rule in rules:
-        candidate_logins = [
-            o.github_username.lower() for o in rule.owners if o.github_username
-        ]
+        candidate_logins = [o.github_username.lower() for o in rule.owners if o.github_username]
         candidate_set = set(candidate_logins)
         if not candidate_set:
             out.append(rule)
@@ -101,7 +99,8 @@ def substitute_teams(
         if len(top_matched) > n_candidates * min_team_share:
             outlier_logins = candidate_set - top_matched
             outlier_owners = [
-                o for o in rule.owners
+                o
+                for o in rule.owners
                 if o.github_username and o.github_username.lower() in outlier_logins
             ]
             out.append(

@@ -109,9 +109,7 @@ def annotate_rules(
             if last.tzinfo is None:
                 last = last.replace(tzinfo=UTC)
             days = max(0, (reference - last).days)
-            owner.strength = adjust_strength_for_recency(
-                base, days, lookback_days=lookback_days
-            )
+            owner.strength = adjust_strength_for_recency(base, days, lookback_days=lookback_days)
     return rules
 
 

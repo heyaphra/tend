@@ -181,9 +181,7 @@ def test_route_pull_request_dry_run_lists_owners(monkeypatch, tmp_path, httpx_mo
     monkeypatch.setenv("EVENT_NAME", "pull_request")
     event = tmp_path / "event.json"
     event.write_text(
-        json.dumps(
-            {"pull_request": {"number": 42, "user": {"login": "dependabot[bot]"}}}
-        ),
+        json.dumps({"pull_request": {"number": 42, "user": {"login": "dependabot[bot]"}}}),
         encoding="utf-8",
     )
     monkeypatch.setenv("EVENT_PATH", str(event))

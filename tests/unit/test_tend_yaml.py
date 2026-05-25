@@ -64,7 +64,8 @@ def test_dump_full_metadata_keys_precede_paths():
     rules = [_rule("/src/", [_owner("alice", 0.7)])]
     text = dump_full(rules, _config(), "balanced", now=RECENT)
     positions = {
-        key: text.index(f"{key}:") for key in ("version", "generated_at", "generated_by", "config", "paths")
+        key: text.index(f"{key}:")
+        for key in ("version", "generated_at", "generated_by", "config", "paths")
     }
     assert positions["version"] < positions["generated_at"]
     assert positions["generated_at"] < positions["generated_by"]
