@@ -15,12 +15,11 @@ test ever talks to api.github.com.
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 from pathlib import Path
 
 import pytest
+import typer.rich_utils
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
@@ -31,17 +30,15 @@ runner = CliRunner()
 
 @pytest.fixture
 def wide_terminal(monkeypatch):
-    """Force Rich/Typer to render help at a fixed wide width.
+    """Force Typer's help renderer to a fixed wide width.
 
-    CI lacks a TTY, so Rich falls back to a narrow width (~110 cols on
-    GitHub Actions) and truncates long option names like
-    `--against-codeowners` to `--against-codeown…`. COLUMNS env vars
-    aren't honored reliably through CliRunner's isolated environment,
-    so patch the underlying size source directly.
+    Typer builds its own Rich Console in `typer.rich_utils` and passes
+    `width=MAX_WIDTH`. When MAX_WIDTH is None (the default), Rich falls
+    back to terminal detection, which on GitHub Actions reports ~110
+    cols and truncates long option names like `--against-codeowners`
+    to `--against-codeown…`. Pin MAX_WIDTH so the layout is stable.
     """
-    size = os.terminal_size((200, 50))
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda *_a, **_kw: size)
-    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 200)
 
 
 # Tend issues GET /repos/.../commits with a since= query param whose value is
