@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 # substring assertions on help text are stable across environments.
 os.environ["COLUMNS"] = "200"
 
-from tend.cli import app  # noqa: E402
+from tend.cli import app
 
 runner = CliRunner()
 
