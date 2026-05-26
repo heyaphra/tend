@@ -1,0 +1,74 @@
+name: 'Tend — SLA aging report'
+description: 'Report open Dependabot PRs by age and SLA; optionally nudge owners.'
+branding:
+  icon: 'clock'
+  color: 'green'
+
+inputs:
+  owners-file:
+    description: 'Path to .tend/owners.yml'
+    default: '.tend/owners.yml'
+  sla-hours:
+    description: 'Default SLA in hours (non-security bumps).'
+    default: '72'
+  security-sla-hours:
+    description: 'SLA in hours for PRs labeled security / security-advisory.'
+    default: '24'
+  fallback-owner:
+    description: 'Handle (e.g. @org/appsec) to escalate to at 2× SLA.'
+    default: ''
+  extra-skip-paths:
+    description: 'Newline-separated extra skip patterns. Built-ins: node_modules/, vendor/, dist/, build/, *.lock'
+    default: ''
+  nudge:
+    description: 'When true, post nudge comments on aging PRs (idempotent via markers).'
+    default: 'false'
+  dry-run:
+    description: 'When true with --nudge, log intended nudges without posting them.'
+    default: 'false'
+  github-token:
+    description: 'Token for read + comment APIs.'
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install tend
+      shell: bash
+      run: |
+        pip install --quiet "${{ github.action_path }}/../.."
+
+    - name: SLA report
+      shell: bash
+      env:
+        TEND_GITHUB_TOKEN: ${{ inputs.github-token }}
+        TEND_FALLBACK_OWNER: ${{ inputs.fallback-owner }}
+        TEND_EXTRA_SKIP_PATHS: ${{ inputs.extra-skip-paths }}
+      run: |
+        ARGS=(
+          --repo "${{ github.repository }}"
+          --owners-file "${{ inputs.owners-file }}"
+          --sla-hours "${{ inputs.sla-hours }}"
+          --security-sla-hours "${{ inputs.security-sla-hours }}"
+        )
+        if [ "${{ inputs.nudge }}" = "true" ]; then
+          ARGS+=(--nudge)
+        fi
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          ARGS+=(--dry-run)
+        fi
+        if [ -n "$TEND_FALLBACK_OWNER" ]; then
+          ARGS+=(--fallback-owner "$TEND_FALLBACK_OWNER")
+        fi
+        if [ -n "$TEND_EXTRA_SKIP_PATHS" ]; then
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            ARGS+=(--extra-skip-path "$path")
+          done <<< "$TEND_EXTRA_SKIP_PATHS"
+        fi
+        tend sla "${ARGS[@]}"

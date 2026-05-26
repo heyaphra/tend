@@ -49,8 +49,11 @@ from tend.github.teams import TeamMembership, fetch_org_teams
 from tend.output.explain import explain_directory
 from tend.output.strength import annotate_rules
 from tend.output.tend_yaml import dump_full
+from tend.route import DEPENDABOT_LOGINS as _ROUTE_DEPENDABOT_LOGINS
 from tend.route.parser import load_owners_yml
 from tend.route.router import VALID_MODES, RoutingMode, route_pr
+from tend.route.skip import DEFAULT_SKIP_PATHS, filter_changed_files
+from tend.route.sla import collect_aging_prs, post_nudges, render_markdown
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -62,7 +65,9 @@ app = typer.Typer(
 )
 
 DEFAULT_CODEOWNERS_PROBE = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
-DEPENDABOT_LOGINS = frozenset({"dependabot[bot]", "dependabot-preview[bot]"})
+# Canonical home is ``tend.route.__init__``; re-exported here for back-compat
+# so anything still importing ``tend.cli.DEPENDABOT_LOGINS`` keeps working.
+DEPENDABOT_LOGINS = _ROUTE_DEPENDABOT_LOGINS
 
 
 def _version_callback(value: bool) -> None:
@@ -362,27 +367,78 @@ def route(
         "--dry-run",
         help="Print what would be routed without calling GitHub",
     ),
+    # ---- v0.3 routing extensions ----
+    security_cc: str | None = typer.Option(
+        None,
+        "--security-cc",
+        help=(
+            "Extra reviewer (e.g. '@org/appsec') added when the PR has a "
+            "'security' label. CC'd in addition to per-file owners."
+        ),
+    ),
+    fallback_owner: str | None = typer.Option(
+        None,
+        "--fallback-owner",
+        help=(
+            "Handle to route to when no per-file rule in owners.yml matches "
+            "(e.g. '@org/appsec'). Useful for catching coverage gaps."
+        ),
+    ),
+    extra_skip_path: list[str] = typer.Option(
+        [],
+        "--extra-skip-path",
+        help=(
+            "Additional skip pattern (repeatable). Same shapes as the matcher: "
+            "'foo/' prefix, exact path, or '*.ext' basename glob. Added to "
+            f"the built-in defaults: {', '.join(DEFAULT_SKIP_PATHS)}."
+        ),
+    ),
+    # ---- v0.3 dev velocity flags ----
+    event_file: Path | None = typer.Option(
+        None,
+        "--event-file",
+        help=(
+            "Override EVENT_PATH with a local JSON file (dev/test). "
+            "Capture a real payload via `cat $GITHUB_EVENT_PATH > fixture.json`."
+        ),
+    ),
+    changed_files: str | None = typer.Option(
+        None,
+        "--changed-files",
+        help=(
+            "Comma-separated changed paths. Overrides the GitHub API call to "
+            "fetch PR files. With --dry-run, no GitHub API call is made at all."
+        ),
+    ),
 ) -> None:
     """Route a Dependabot-authored PR to its owners.
 
     Reads the GitHub event from ``EVENT_NAME`` / ``EVENT_PATH`` env vars
-    (set by the Actions runner). v1 only routes PRs whose author is
-    ``dependabot[bot]`` (or the legacy ``dependabot-preview[bot]``);
-    other PRs, non-PR events, and ``dependabot_alert`` (v1.1 planned)
-    are logged and skipped.
+    (set by the Actions runner) — or from ``--event-file`` for local
+    testing. v1 only routes PRs whose author is ``dependabot[bot]`` (or
+    the legacy ``dependabot-preview[bot]``); other PRs, non-PR events,
+    and ``dependabot_alert`` (v1.1 planned) are logged and skipped.
 
-    When ``--mode=assign``/``all`` the resulting assignee list is
-    canonical: pre-existing assignees not in tend's picks are removed
-    before tend's picks are added. GitHub does not expose assignee
-    provenance, so this override is unconditional.
+    Bot PRs are routed as review requests, not assignments: assignees
+    imply ownership of a work item, which doesn't apply to a bot. When
+    ``--mode=assign`` is passed for a bot PR, tend downgrades to
+    ``request-review``.
+
+    Files under ``node_modules/``, ``vendor/``, ``dist/``, ``build/``, and
+    ``*.lock`` basenames are stripped before owner matching — they have
+    no meaningful owner. If every file is stripped and ``--fallback-owner``
+    is set, the PR routes to the fallback.
     """
     if mode not in VALID_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(VALID_MODES)}")
     owner, name = _split_repo(repo)
-    auth = _auth_from_token_or_env(github_token)
 
+    # ---- Resolve event source: --event-file overrides env vars. ----
     event_name = os.environ.get("EVENT_NAME", "")
-    event_path = os.environ.get("EVENT_PATH", "")
+    event_path = str(event_file) if event_file else os.environ.get("EVENT_PATH", "")
+    if event_file and not event_name:
+        # Local fixture: assume pull_request unless caller is explicit.
+        event_name = "pull_request"
 
     if not event_name:
         console.print("[yellow]No EVENT_NAME set — nothing to route.[/yellow]")
@@ -420,30 +476,75 @@ def route(
         console.print("[red]Could not find PR number in event payload.[/red]")
         raise typer.Exit(1)
 
+    # ---- Security awareness: label-based detection. ----
+    label_names = {(lbl or {}).get("name", "") for lbl in pr_payload.get("labels") or []}
+    is_security = "security" in label_names or "security-advisory" in label_names
+
+    extra_reviewers: list[str] | None = None
+    if is_security and security_cc:
+        extra_reviewers = [security_cc]
+
+    fallback_handles: list[str] | None = [fallback_owner] if fallback_owner else None
+
     ownership = load_owners_yml(owners_file)
+
+    # ---- Dev velocity: pre-parse --changed-files; skip token when fully offline. ----
+    changed_files_override: list[str] | None = None
+    if changed_files:
+        changed_files_override = [f.strip() for f in changed_files.split(",") if f.strip()]
+        # When the file list is supplied locally and we're dry-running, no
+        # GitHub API call is ever issued (the bot override gives us
+        # request-review, which doesn't fetch the PR; dry-run blocks writes).
+        # In that case allow a missing token — improves dev DX.
+        if dry_run and not github_token and not os.environ.get("TEND_GITHUB_TOKEN"):
+            github_token = "dev-only-fake-token"
+
+    auth = _auth_from_token_or_env(github_token)
+
+    skip_paths = (*DEFAULT_SKIP_PATHS, *extra_skip_path)
 
     async def _run() -> int:
         async with GitHubClient(auth=auth) as gh:
-            changed = await gh.get_pr_files(owner, name, pr_number)
-            changed_files = [f["filename"] for f in changed if f.get("filename")]
+            if changed_files_override is not None:
+                raw_files = changed_files_override
+            else:
+                changed = await gh.get_pr_files(owner, name, pr_number)
+                raw_files = [f["filename"] for f in changed if f.get("filename")]
+
+            kept, filtered = filter_changed_files(raw_files, skip_paths)
+
             result = await route_pr(
                 gh=gh,
                 owner=owner,
                 repo=name,
                 pr_number=pr_number,
-                changed_files=changed_files,
+                changed_files=kept,
                 ownership=ownership,
                 mode=cast("RoutingMode", mode),
                 dry_run=dry_run,
+                is_bot_author=True,  # we already filtered to DEPENDABOT_LOGINS above
+                extra_reviewers=extra_reviewers,
+                fallback_handles=fallback_handles,
             )
-        _print_routing_result(result)
+        _print_routing_result(result, filtered_files=filtered, is_security=is_security)
         return 0
 
     raise typer.Exit(asyncio.run(_run()))
 
 
-def _print_routing_result(result: Any) -> None:
+def _print_routing_result(
+    result: Any,
+    *,
+    filtered_files: list[str] | None = None,
+    is_security: bool = False,
+) -> None:
     prefix = "[dim](dry-run)[/dim] " if result.dry_run else ""
+    if is_security:
+        console.print("[red]Security-advisory PR detected (label-based).[/red]")
+    if getattr(result, "effective_mode", None):
+        console.print(f"[dim]Effective mode: {result.effective_mode}[/dim]")
+    if getattr(result, "fallback_used", False):
+        console.print(f"{prefix}[yellow]Fallback used:[/yellow] no per-file rule matched.")
     if result.assigned:
         console.print(f"{prefix}[green]Assigned:[/green] {', '.join(result.assigned)}")
     if result.removed_assignees:
@@ -457,8 +558,17 @@ def _print_routing_result(result: Any) -> None:
             *(f"@org/{t}" for t in result.team_reviewers_requested),
         ]
         console.print(f"{prefix}[green]Reviewers requested:[/green] {', '.join(all_revs)}")
+    if getattr(result, "cc_handles", None):
+        console.print(f"[dim]CC: {', '.join(result.cc_handles)}[/dim]")
     if result.comment_posted:
         console.print(f"{prefix}[green]Comment posted.[/green]")
+    if filtered_files:
+        console.print(
+            f"[dim]Skipped {len(filtered_files)} vendored/generated file(s): "
+            f"{', '.join(filtered_files[:3])}"
+            + (f", … (+{len(filtered_files) - 3} more)" if len(filtered_files) > 3 else "")
+            + "[/dim]"
+        )
     if result.skipped_files:
         console.print(
             f"[dim]No matching rule for {len(result.skipped_files)} files: "
@@ -470,6 +580,136 @@ def _print_routing_result(result: Any) -> None:
             )
             + "[/dim]"
         )
+
+
+# -------- sla --------
+
+
+@app.command()
+def sla(
+    repo: str = typer.Option(..., "--repo", help="GitHub repo as owner/name"),
+    owners_file: Path = typer.Option(
+        Path(".tend/owners.yml"),
+        "--owners-file",
+        help="Path to the ownership file",
+    ),
+    github_token: str | None = typer.Option(None, "--github-token", envvar="TEND_GITHUB_TOKEN"),
+    sla_hours: int = typer.Option(
+        72, "--sla-hours", help="Default SLA threshold in hours (regular bumps)."
+    ),
+    security_sla_hours: int = typer.Option(
+        24,
+        "--security-sla-hours",
+        help="SLA threshold (hours) for PRs labeled 'security' or 'security-advisory'.",
+    ),
+    fallback_owner: str | None = typer.Option(
+        None,
+        "--fallback-owner",
+        help="Handle to mention at escalation when owners.yml has no match.",
+    ),
+    extra_skip_path: list[str] = typer.Option(
+        [],
+        "--extra-skip-path",
+        help="Additional skip pattern (repeatable). Added to defaults.",
+    ),
+    nudge: bool = typer.Option(
+        False,
+        "--nudge",
+        help=(
+            "Post nudge comments on PRs in breach / double_breach state. "
+            "Idempotent via HTML-comment markers."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="With --nudge, print intended comments without posting them.",
+    ),
+    fixture: Path | None = typer.Option(
+        None,
+        "--fixture",
+        help=(
+            "JSON file with {open_pulls: [...], changed_files: {n: [...]}}. "
+            "Replaces live list_open_pulls calls. Offline dev/test."
+        ),
+    ),
+) -> None:
+    """Report Dependabot PR aging vs SLA; optionally post nudge comments.
+
+    Walks open PRs, filters to Dependabot authors, classifies severity by
+    label (``security`` / ``security-advisory`` → ``--security-sla-hours``,
+    everything else → ``--sla-hours``), and renders a markdown table to
+    ``$GITHUB_STEP_SUMMARY`` if set, else stdout.
+
+    SLA clock starts at ``pull_request.created_at`` (stable across
+    Dependabot rebases / force-pushes).
+
+    Always exits 0 — aging is informational, not a build failure.
+    """
+    owner_name, repo_name = _split_repo(repo)
+    ownership = load_owners_yml(owners_file)
+
+    fixture_data: dict[str, Any] | None = None
+    if fixture:
+        fixture_data = json.loads(fixture.read_text(encoding="utf-8"))
+        # Offline: no API calls if fixture covers everything; allow a fake token.
+        if not github_token and not os.environ.get("TEND_GITHUB_TOKEN"):
+            github_token = "dev-only-fake-token"
+
+    auth = _auth_from_token_or_env(github_token)
+    skip_paths = (*DEFAULT_SKIP_PATHS, *extra_skip_path)
+
+    async def _run() -> None:
+        async with GitHubClient(auth=auth) as gh:
+            report = await collect_aging_prs(
+                gh=gh,
+                owner=owner_name,
+                repo=repo_name,
+                ownership=ownership,
+                default_sla_hours=sla_hours,
+                security_sla_hours=security_sla_hours,
+                fallback_owner=fallback_owner,
+                skip_paths=skip_paths,
+                fixture=fixture_data,
+            )
+            markdown = render_markdown(report)
+
+            summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary_path:
+                with open(summary_path, "a", encoding="utf-8") as fh:
+                    fh.write(markdown + "\n")
+                console.print(
+                    f"[green]Wrote SLA report to $GITHUB_STEP_SUMMARY "
+                    f"({len(report.prs)} PR(s)).[/green]"
+                )
+            else:
+                console.print(markdown)
+
+            if nudge:
+                # In fixture mode, use the fixture's existing_comments
+                # (if provided) instead of hitting the live API.
+                existing_map: dict[int, list[Any]] | None = None
+                if fixture_data is not None:
+                    raw_map = fixture_data.get("existing_comments") or {}
+                    existing_map = {int(k): list(v) for k, v in raw_map.items()}
+                posted = await post_nudges(
+                    gh=gh,
+                    owner=owner_name,
+                    repo=repo_name,
+                    report=report,
+                    dry_run=dry_run,
+                    existing_comments_map=existing_map,
+                )
+                verb = "Would post" if dry_run else "Posted"
+                if posted:
+                    console.print(
+                        f"[green]{verb} {len(posted)} nudge(s): "
+                        f"{', '.join(f'#{n} ({lvl})' for n, lvl in posted)}[/green]"
+                    )
+                else:
+                    console.print("[dim]No nudges needed (or all already posted).[/dim]")
+
+    asyncio.run(_run())
 
 
 # -------- create-pr (convenience wrapper) --------

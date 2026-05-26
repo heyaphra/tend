@@ -172,6 +172,12 @@ def test_route_dependabot_alert_logs_and_exits_zero(monkeypatch, tmp_path):
 
 
 def test_route_pull_request_dry_run_lists_owners(monkeypatch, tmp_path, httpx_mock: HTTPXMock):
+    """v0.3: Bot PRs requested as ``--mode assign`` are routed as
+    ``request-review`` because assignees imply ownership of a work item.
+
+    GET /pulls/{n} is therefore NOT called (request-review doesn't fetch
+    the PR for existing assignees). The only API call is the changed-files
+    fetch."""
     monkeypatch.setenv("TEND_GITHUB_TOKEN", "fake")
     monkeypatch.setenv("EVENT_NAME", "pull_request")
     event = tmp_path / "event.json"
@@ -198,10 +204,6 @@ paths:
         url="https://api.github.com/repos/o/r/pulls/42/files?per_page=100",
         json=[{"filename": "src/auth.py"}],
     )
-    httpx_mock.add_response(
-        url="https://api.github.com/repos/o/r/pulls/42",
-        json={"assignees": []},
-    )
 
     result = runner.invoke(
         app,
@@ -219,6 +221,12 @@ paths:
     assert result.exit_code == 0
     assert "alice" in result.stdout
     assert "dry-run" in result.stdout
+    # Bot override fired: effective mode downgraded from assign to request-review.
+    assert "request-review" in result.stdout
+    # GET /pulls/42 was NOT issued — request-review mode is reviewer-only.
+    assert not any(
+        r.url.path == "/repos/o/r/pulls/42" and r.method == "GET" for r in httpx_mock.get_requests()
+    )
 
 
 def test_route_non_dependabot_author_skips(monkeypatch, tmp_path):

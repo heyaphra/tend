@@ -355,3 +355,10 @@ class GitHubClient:
             json={"body": body},
         )
         return resp.json()
+
+    async def list_issue_comments(
+        self, owner: str, repo: str, issue_number: int
+    ) -> list[dict[str, Any]]:
+        """List comments on an issue/PR. Used by the SLA nudge bot to
+        check for prior tend-nudge markers (idempotency)."""
+        return await self.paginate(f"/repos/{owner}/{repo}/issues/{issue_number}/comments")

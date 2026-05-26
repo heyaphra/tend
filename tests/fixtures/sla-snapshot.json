@@ -1,0 +1,46 @@
+{
+  "open_pulls": [
+    {
+      "number": 4710,
+      "title": "Bump express from 4.18.1 to 4.18.2",
+      "html_url": "https://github.com/acme/widgets/pull/4710",
+      "user": {"login": "dependabot[bot]"},
+      "labels": [{"name": "dependencies"}, {"name": "javascript"}],
+      "created_at": "2026-05-18T08:00:00Z"
+    },
+    {
+      "number": 4712,
+      "title": "[security] Bump cryptography from 41.0.3 to 41.0.6",
+      "html_url": "https://github.com/acme/widgets/pull/4712",
+      "user": {"login": "dependabot[bot]"},
+      "labels": [
+        {"name": "dependencies"},
+        {"name": "python"},
+        {"name": "security"}
+      ],
+      "created_at": "2026-05-22T14:00:00Z"
+    },
+    {
+      "number": 4715,
+      "title": "Bump react from 18.2.0 to 18.3.0",
+      "html_url": "https://github.com/acme/widgets/pull/4715",
+      "user": {"login": "dependabot[bot]"},
+      "labels": [{"name": "dependencies"}],
+      "created_at": "2026-05-24T10:00:00Z"
+    },
+    {
+      "number": 4720,
+      "title": "Refactor: extract auth helper",
+      "html_url": "https://github.com/acme/widgets/pull/4720",
+      "user": {"login": "alice"},
+      "labels": [{"name": "refactor"}],
+      "created_at": "2026-05-25T10:00:00Z"
+    }
+  ],
+  "changed_files": {
+    "4710": ["services/api/package.json", "services/api/package-lock.json"],
+    "4712": ["services/api/Pipfile", "services/api/Pipfile.lock"],
+    "4715": ["services/web/package.json", "services/web/yarn.lock"],
+    "4720": ["services/api/auth.py"]
+  }
+}

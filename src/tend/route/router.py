@@ -19,6 +19,7 @@ the GitHub client as an injected dependency. Tests mock the client.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 RoutingMode = Literal["assign", "request-review", "comment", "all"]
 VALID_MODES: tuple[RoutingMode, ...] = ("assign", "request-review", "comment", "all")
+
+# Sentinel key used in ``owners_by_file`` when fallback handles are routed.
+# A real GitHub file path can never start with ``_`` because git paths are
+# relative without leading-underscore directories in practice, and this is
+# easy to detect in result inspection.
+FALLBACK_FILES_KEY = "_fallback"
 
 
 @dataclass
@@ -45,6 +52,10 @@ class RoutingResult:
     owners_by_file: dict[str, list[str]] = field(default_factory=dict)
     skipped_files: list[str] = field(default_factory=list)  # no matching rule
     dry_run: bool = False
+    # v0.3 additions
+    fallback_used: bool = False
+    effective_mode: RoutingMode | None = None
+    cc_handles: list[str] = field(default_factory=list)
 
 
 def _split_individuals_and_teams(handles: set[str]) -> tuple[list[str], list[str]]:
@@ -94,22 +105,43 @@ async def route_pr(
     ownership: OwnershipFile,
     mode: RoutingMode,
     dry_run: bool = False,
+    # ---- v0.3 additions, all optional so existing callers/tests work ----
+    is_bot_author: bool = False,
+    extra_reviewers: Sequence[str] | None = None,
+    fallback_handles: Sequence[str] | None = None,
 ) -> RoutingResult:
     """Dispatch the PR to the owners matched by ``ownership``.
 
     Algorithm:
       1. For each changed file, find the most specific matching rule via
          ``matcher.find_owner``.
-      2. Aggregate all matched owners (deduplicated).
-      3. Apply ``mode``:
+      2. Aggregate all matched owners (deduplicated). If nothing matched
+         and ``fallback_handles`` is set, route to the fallback.
+      3. Append ``extra_reviewers`` (CC list) to the handle set — always
+         additive; never replaces per-file owners.
+      4. Compute ``effective_mode``: when ``is_bot_author=True`` and
+         ``mode="assign"``, downgrade to ``request-review``. Bot PRs need
+         an approver, not an assignee. Other modes are respected.
+      5. Apply ``effective_mode``:
          - ``assign`` → POST /repos/.../issues/{n}/assignees
          - ``request-review`` → POST /repos/.../pulls/{n}/requested_reviewers
          - ``comment`` → POST /repos/.../issues/{n}/comments mentioning owners
          - ``all`` → all three
-      4. Return a ``RoutingResult`` describing what happened.
+      6. Return a ``RoutingResult`` describing what happened.
+
+    Note on dedupe: ``all_handles`` is a ``set[str]``. A PR touching
+    ``package.json`` + ``package-lock.json`` (both matched by the same
+    rule) produces exactly one entry per handle, so review-request POSTs
+    are issued once, not per-file.
     """
     if mode not in VALID_MODES:
         raise ValueError(f"Unknown routing mode {mode!r}; expected one of {VALID_MODES}")
+
+    # Bot-author override: bot PRs default to request-review since "assign"
+    # implies ownership of the work item, which doesn't apply to a bot.
+    # Only "assign" mode is overridden — "comment", "request-review", and
+    # "all" are explicit choices we respect.
+    effective_mode: RoutingMode = "request-review" if (is_bot_author and mode == "assign") else mode
 
     matches = find_owners_for_files(ownership, changed_files)
     owners_by_file: dict[str, list[str]] = {}
@@ -126,14 +158,40 @@ async def route_pr(
         owners_by_file[fp] = handles
         all_handles.update(handles)
 
-    result = RoutingResult(owners_by_file=owners_by_file, skipped_files=skipped, dry_run=dry_run)
+    # Fallback: nothing matched directly, but caller gave us a default.
+    fallback_used = False
+    if not all_handles and fallback_handles:
+        fallback_used = True
+        fb_handles = [h if h.startswith("@") else f"@{h}" for h in fallback_handles]
+        all_handles.update(fb_handles)
+        owners_by_file[FALLBACK_FILES_KEY] = list(fb_handles)
+        # When fallback rescues the routing, the "skipped" list is no
+        # longer accurate — those files are covered by the fallback.
+        skipped = []
+
+    # CC list: always additive. Even when no per-file owners matched and
+    # no fallback fires, a non-empty CC ensures (e.g.) AppSec is reached
+    # on a security-advisory PR with an unmapped path.
+    cc_added: list[str] = []
+    if extra_reviewers:
+        cc_added = [h if h.startswith("@") else f"@{h}" for h in extra_reviewers]
+        all_handles.update(cc_added)
+
+    result = RoutingResult(
+        owners_by_file=owners_by_file,
+        skipped_files=skipped,
+        dry_run=dry_run,
+        fallback_used=fallback_used,
+        effective_mode=effective_mode,
+        cc_handles=list(cc_added),
+    )
     if not all_handles:
         logger.info("No owners matched for PR #%s — nothing to route", pr_number)
         return result
 
     individuals, teams = _split_individuals_and_teams(all_handles)
 
-    if mode in ("assign", "all"):
+    if effective_mode in ("assign", "all"):
         result.assigned = list(individuals)
         tend_picks = set(individuals)
         pr = await gh.get_pr(owner, repo, pr_number)
@@ -146,7 +204,7 @@ async def route_pr(
             if individuals:
                 await gh.add_assignees(owner, repo, pr_number, individuals)
 
-    if mode in ("request-review", "all"):
+    if effective_mode in ("request-review", "all"):
         result.reviewers_requested = list(individuals)
         result.team_reviewers_requested = list(teams)
         if not dry_run and (individuals or teams):
@@ -158,7 +216,7 @@ async def route_pr(
                 team_reviewers=teams or None,
             )
 
-    if mode in ("comment", "all"):
+    if effective_mode in ("comment", "all"):
         result.comment_posted = True
         if not dry_run:
             await gh.post_issue_comment(owner, repo, pr_number, _format_comment(owners_by_file))
