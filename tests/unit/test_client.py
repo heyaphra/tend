@@ -109,3 +109,20 @@ async def test_get_file_content_returns_none_on_404(httpx_mock: HTTPXMock):
     async with GitHubClient(auth=token_auth("t")) as gh:
         content = await gh.get_file_content("o", "r", "missing.md")
     assert content is None
+
+
+@pytest.mark.asyncio
+async def test_client_follows_301_redirect(httpx_mock: HTTPXMock):
+    """Renamed/transferred repos return 301 to the new location — follow it."""
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/tiangolo/fastapi",
+        status_code=301,
+        headers={"Location": "https://api.github.com/repos/fastapi/fastapi"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/fastapi/fastapi",
+        json={"default_branch": "master"},
+    )
+    async with GitHubClient(auth=token_auth("t")) as gh:
+        branch = await gh.get_default_branch("tiangolo", "fastapi")
+    assert branch == "master"

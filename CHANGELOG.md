@@ -5,6 +5,17 @@ All notable changes to Tend are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and Tend adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.3.1
+
+### Fixed
+- **Follow GitHub redirects on renamed/transferred repos.** The
+  ``GitHubClient`` ``httpx.AsyncClient`` now sets
+  ``follow_redirects=True``, so ``tend analyze --repo old-owner/repo``
+  no longer crashes with a 301 when the repo has been renamed or moved
+  to a new owner. Scope is constrained to ``api.github.com``, so only
+  GitHub's own redirects are followed.
+- ``tend`` version bumped to **0.3.1**.
+
 ## [Unreleased] — v0.3.0
 
 The Dependabot vulnerability-management MVP. Tend goes from "routes

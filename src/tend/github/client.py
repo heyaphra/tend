@@ -90,6 +90,7 @@ class GitHubClient:
                 },
                 timeout=30.0,
                 http2=True,
+                follow_redirects=True,
             )
         return self
 
