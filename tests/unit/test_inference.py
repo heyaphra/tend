@@ -120,6 +120,29 @@ def test_min_commits_filters_low_activity():
             assert owner.github_username == "alice"
 
 
+def test_handle_casing_collisions_collapse_to_single_owner():
+    """GitHub handles are case-insensitive; ``Alice`` and ``alice`` are the
+    same person and must collapse to one entry with one consistent casing
+    across all paths. Regression: API-resolved logins and noreply-extracted
+    logins can disagree on case for the same user.
+    """
+    contribs = [
+        # /src/ — mixed-case handle dominates (2 commits).
+        _fc("src/foo.py", "alice@x.com", "Alice", "Alice", 30, 500, 100, RECENT),
+        _fc("src/bar.py", "alice@x.com", "Alice", "Alice", 30, 500, 100, RECENT),
+        # /docs/ — lowercase handle on its own.
+        _fc("docs/readme.md", "alice@x.com", "Alice", "alice", 30, 500, 100, RECENT),
+    ]
+    result = infer(contribs, _cfg())
+    handles_per_rule = [{o.github_username for o in r.owners} for r in result.rules]
+    # Every rule lists Alice under exactly one casing.
+    for handles in handles_per_rule:
+        assert len(handles) == 1
+    # And it's the same casing everywhere — most-frequent wins.
+    all_handles = {h for s in handles_per_rule for h in s}
+    assert all_handles == {"Alice"}
+
+
 def test_unresolved_contributors_are_dropped():
     contribs = [
         _fc("foo.py", "alice@x.com", "Alice", "alice", 30, 500, 100, RECENT),

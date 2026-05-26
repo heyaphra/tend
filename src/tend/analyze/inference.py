@@ -20,6 +20,9 @@ a separate post-pass — the caller decides whether to apply it.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+from dataclasses import replace
+
 from tend.analyze._models import (
     FileContribution,
     InferenceResult,
@@ -42,6 +45,48 @@ from tend.github.associations import Association
 from tend.github.teams import TeamMembership
 
 _PINNED_EVIDENCE_MARKER = "pinned via .tend/owners.yml"
+
+
+def _canonicalize_handle_casing(
+    contributions: list[FileContribution],
+) -> list[FileContribution]:
+    """Pick one display casing per GitHub handle so the same person renders
+    identically across all paths.
+
+    GitHub usernames are case-insensitive at resolution, but the same person's
+    commits can carry different casings in our data — API-resolved logins use
+    the user's preferred profile casing (``YuriiMotov``) while noreply-email
+    extraction always produces lowercase (``yuriimotov``). Without a unifying
+    pass, ``.tend/owners.yml`` can list both as separate owners on different
+    paths and ``collapse._aggregate_owners`` (case-sensitive on
+    ``github_username``) won't merge them.
+
+    Strategy: most-frequent casing wins, ties broken by first-seen.
+    """
+    casing_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    first_seen: dict[str, str] = {}
+    for c in contributions:
+        if not c.github_username:
+            continue
+        key = c.github_username.lower()
+        casing_counts[key][c.github_username] += 1
+        first_seen.setdefault(key, c.github_username)
+
+    canonical: dict[str, str] = {}
+    for key, counts in casing_counts.items():
+        max_count = max(counts.values())
+        tied = [casing for casing, count in counts.items() if count == max_count]
+        canonical[key] = first_seen[key] if first_seen[key] in tied else tied[0]
+
+    out: list[FileContribution] = []
+    for c in contributions:
+        if c.github_username:
+            preferred = canonical[c.github_username.lower()]
+            if preferred != c.github_username:
+                out.append(replace(c, github_username=preferred))
+                continue
+        out.append(c)
+    return out
 
 
 def _rule_sort_key(pattern: str) -> tuple[int, str]:
@@ -168,6 +213,7 @@ def infer(
 
     This function does no I/O.
     """
+    contributions = _canonicalize_handle_casing(contributions)
     per_dir = score_per_directory(contributions, config, associations)
     per_dir = apply_breadth_penalty(per_dir, presence_threshold=config.breadth_share_threshold)
     rules, dropped_threshold, dropped_min_commits, all_owners = _emit_rules(per_dir, config)

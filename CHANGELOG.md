@@ -14,6 +14,15 @@ and Tend adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer crashes with a 301 when the repo has been renamed or moved
   to a new owner. Scope is constrained to ``api.github.com``, so only
   GitHub's own redirects are followed.
+- **Case-insensitive contributor dedup.** Handles like ``YuriiMotov``
+  (from the GitHub API's preferred-casing login) and ``yuriimotov``
+  (from a ``users.noreply.github.com`` email extraction) are the same
+  person, but the inference pipeline previously emitted them as two
+  separate owners on different paths in ``.tend/owners.yml``. ``infer``
+  now canonicalizes handle casing up-front — most-frequent casing wins,
+  ties broken by first-seen — so downstream stages (scoring,
+  collapse-aggregation, team substitution) merge correctly and the YAML
+  picks one display casing per contributor.
 - ``tend`` version bumped to **0.3.1**.
 
 ## [Unreleased] — v0.3.0
