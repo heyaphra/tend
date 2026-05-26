@@ -11,6 +11,9 @@ inputs:
   routing-mode:
     description: 'assign | request-review | comment | all'
     default: 'request-review'
+  dry-run:
+    description: 'When true, log the routing plan without calling GitHub write APIs'
+    default: 'false'
   github-token:
     description: 'Token for assignment and review-request API'
     default: ${{ github.token }}
@@ -39,7 +42,12 @@ runs:
         # PRs are logged and skipped by the CLI. dependabot_alert events
         # are recognized and logged but not routed — full handling lands
         # in v1.1.
+        DRY_FLAG=""
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          DRY_FLAG="--dry-run"
+        fi
         tend route \
           --owners-file "${{ inputs.owners-file }}" \
           --mode "${{ inputs.routing-mode }}" \
-          --repo "${{ github.repository }}"
+          --repo "${{ github.repository }}" \
+          $DRY_FLAG
