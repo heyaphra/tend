@@ -1,0 +1,28 @@
+version: 1
+generated_at: "2026-05-20T12:00:00+00:00"
+generated_by: "tend/0.3.0"
+
+config:
+  sensitivity: balanced
+  lookback_days: 180
+
+paths:
+  /services/api/:
+    - handle: alice
+      strength: strong
+      commits: 47
+      last_touched: 2026-05-22
+    - handle: bob
+      strength: moderate
+      commits: 12
+      last_touched: 2026-04-30
+  /services/web/:
+    - handle: acme/frontend
+      strength: strong
+      commits: 0
+      last_touched: 2026-05-23
+  /docs/:
+    - handle: acme/docs
+      strength: strong
+      commits: 0
+      last_touched: 2026-05-21

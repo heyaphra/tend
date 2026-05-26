@@ -1,0 +1,26 @@
+{
+  "action": "opened",
+  "number": 4713,
+  "pull_request": {
+    "number": 4713,
+    "title": "Bump foo in /vendor/foo from 1.2.0 to 1.2.1",
+    "html_url": "https://github.com/acme/widgets/pull/4713",
+    "state": "open",
+    "draft": false,
+    "user": {
+      "login": "dependabot[bot]",
+      "type": "Bot"
+    },
+    "labels": [
+      {"name": "dependencies"},
+      {"name": "go"}
+    ],
+    "created_at": "2026-05-25T09:00:00Z",
+    "updated_at": "2026-05-25T09:00:00Z",
+    "body": "Bumps foo from 1.2.0 to 1.2.1. This PR touches only vendored files."
+  },
+  "repository": {
+    "full_name": "acme/widgets",
+    "default_branch": "main"
+  }
+}
