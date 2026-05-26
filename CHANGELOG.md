@@ -5,6 +5,75 @@ All notable changes to Tend are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and Tend adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.3.0
+
+The Dependabot vulnerability-management MVP. Tend goes from "routes
+Dependabot PRs to their owners" to "operationalizes Dependabot triage
+with severity-aware routing, vendored-path skipping, and SLA tracking
+with nudges." All additions are layered on top of the existing
+``route_pr`` / ``owners.yml`` flow — no schema changes, no new config
+file. Settings vary via CLI flags / Action inputs.
+
+### Added
+- **Bot-author override.** ``--mode assign`` on a Dependabot-authored PR
+  is downgraded to ``request-review``: assignees imply ownership of a
+  work item, which doesn't apply to a bot. Other modes are unchanged.
+- **Security-label awareness.** PRs with a ``security`` or
+  ``security-advisory`` label are detected at routing time. Combine with
+  ``--security-cc @org/appsec`` to always CC the security team on those
+  PRs (additive — does not replace per-file owners).
+- **Skip-paths + fallback owner.** Files under ``node_modules/``,
+  ``vendor/``, ``dist/``, ``build/``, and ``*.lock`` basenames are
+  stripped before owner matching. ``--extra-skip-path`` (repeatable)
+  adds more; ``--fallback-owner @org/appsec`` routes the PR there when
+  no per-file rule matches (or every file was skipped).
+- **``tend sla`` subcommand.** Walks open Dependabot PRs, classifies
+  severity by label, computes age vs. per-severity SLA, renders a
+  grouped markdown table to ``$GITHUB_STEP_SUMMARY`` (else stdout).
+  Flags: ``--sla-hours`` (default 72), ``--security-sla-hours``
+  (default 24). Always exits 0.
+- **Nudge / escalation comments.** ``tend sla --nudge`` posts comments
+  on PRs past SLA, mentioning the next-strongest owner. At 2× SLA the
+  comment escalates to ``--fallback-owner``. Idempotent via HTML-comment
+  markers (``<!-- tend-nudge:breach:@handle -->``); a re-run posts
+  nothing. A breach→double-breach transition produces a second comment
+  with the escalation marker — by design.
+- **Dev velocity flags on ``tend route``.** ``--event-file`` overrides
+  ``EVENT_PATH`` with a local JSON fixture; ``--changed-files`` skips
+  the GitHub API call to fetch PR files. With ``--dry-run`` you can run
+  the full routing logic offline in under a second — no fork, no PR.
+- **``--fixture`` flag on ``tend sla``.** JSON file with
+  ``{open_pulls: [...], changed_files: {n: [...]}}`` replaces live
+  GitHub calls — same offline workflow as ``tend route``.
+- **New composite action ``actions/report-sla``.** Wraps ``tend sla``
+  with cron-friendly inputs. Recommended consumer cron:
+  ``0 13 * * 1-5`` (weekdays, 1pm UTC).
+- **Event fixtures.** ``tests/fixtures/events/`` ships four hand-crafted
+  payloads (security PR, regular bump, vendored-only, human author)
+  and ``tests/fixtures/sla-snapshot.json`` for offline test/dev work.
+
+### Changed
+- ``DEPENDABOT_LOGINS`` moved from ``cli.py`` to
+  ``tend.route.__init__`` so the SLA collector can import it without a
+  circular dependency. Still re-exported from ``tend.cli`` for
+  back-compat.
+- ``RoutingResult`` gains ``fallback_used``, ``effective_mode``, and
+  ``cc_handles`` fields. All new fields default to safe values; v0.2.x
+  callers and tests work unchanged.
+- ``actions/route/action.yml`` gains inputs ``security-cc``,
+  ``fallback-owner``, ``extra-skip-paths``. All optional; behavior
+  unchanged when omitted.
+- ``tend`` version bumped to **0.3.0**.
+
+### Deferred (NOT in v0.3)
+- ``.tend/route.yml`` config file. Settings live as CLI flags / Action
+  inputs for now; we'll revisit if a customer hits the limits.
+- Dependabot-alert routing (still v1.1).
+- Slack / email destinations for the SLA report.
+- ``--fail-on-double-breach`` (reserved flag space, currently a no-op).
+- GraphQL Security Advisories API for ground-truth severity (label
+  heuristic is sufficient for MVP).
+
 ## [Unreleased] — v0.2.0
 
 ### Changed
